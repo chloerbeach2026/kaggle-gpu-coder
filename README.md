@@ -1,0 +1,82 @@
+# Kaggle GPU Coder Server
+
+Run a strong open-source **coding LLM for free** on Kaggle's 2x Tesla T4 GPUs (30 GPU-hours/week), and use it from your own machine in Cline, Continue, aider, or any OpenAI-compatible tool.
+
+```
+Kaggle (2x T4, 32GB VRAM total)
+  └── vLLM  ── OpenAI-compatible API on :8000
+        └── Cloudflare quick tunnel ── https://xxxx.trycloudflare.com
+              └── your laptop: Cline / Continue / aider / curl
+```
+
+## Model choice
+
+| Model | Why | Single-stream speed on 2x T4 |
+|---|---|---|
+| **Qwen3-Coder-30B-A3B-Instruct** (4-bit, default) | MoE — only ~3B params active per token → fast on old GPUs, coding quality of a 30B model | ~30–60 tok/s |
+| Qwen2.5-Coder-14B-Instruct-AWQ (fallback) | Official Qwen quant, rock-solid on T4 + vLLM | ~20–35 tok/s |
+
+> **About "100 tok/s":** on a single request, T4s (2018 hardware, 320 GB/s memory bandwidth, no FlashAttention-2, no bf16) top out well below that for any model worth coding with. vLLM's continuous batching *does* push **total** throughput past 100 tok/s when several requests run in parallel (e.g. agentic tools firing multiple calls).
+
+## Setup (once)
+
+1. Create a Kaggle account, verify phone number (required for GPU + internet access).
+2. Kaggle → **Create → Notebook** → File → Import Notebook → upload `kaggle-coder-server.ipynb`.
+3. In the notebook's right sidebar: **Accelerator = GPU T4 x2**, **Internet = On**.
+4. Run all cells. First run downloads the model (~17GB, 5–15 min).
+5. Copy the printed `https://....trycloudflare.com/v1` URL.
+
+Leave the last (keep-alive) cell running. Kaggle kills sessions after ~9–12h; just re-run — you'll get a new URL.
+
+## Connect from your machine
+
+Everything below uses:
+- **Base URL:** `https://<your-tunnel>.trycloudflare.com/v1`
+- **API key:** `kaggle-local-key`
+- **Model:** `coder`
+
+### aider
+```bash
+export OPENAI_API_BASE=https://<your-tunnel>.trycloudflare.com/v1
+export OPENAI_API_KEY=kaggle-local-key
+aider --model openai/coder
+```
+
+### Continue (VS Code) — `~/.continue/config.yaml`
+```yaml
+models:
+  - name: kaggle-coder
+    provider: openai
+    model: coder
+    apiBase: https://<your-tunnel>.trycloudflare.com/v1
+    apiKey: kaggle-local-key
+```
+
+### Cline (VS Code)
+Settings → API Provider: **OpenAI Compatible** → Base URL, API key, and Model ID as above.
+
+### Python
+```python
+from openai import OpenAI
+client = OpenAI(base_url="https://<your-tunnel>.trycloudflare.com/v1",
+                api_key="kaggle-local-key")
+r = client.chat.completions.create(model="coder",
+    messages=[{"role": "user", "content": "hello"}])
+print(r.choices[0].message.content)
+```
+
+### Why not Ollama?
+Ollama runs models **locally** — it cannot attach to a remote GPU backend. vLLM's OpenAI-compatible API is the standard way to do remote serving, and every serious coding tool supports it directly.
+
+## Troubleshooting
+
+- **vLLM dies on startup / OOM** → lower `MAX_MODEL_LEN` to `16384`, or switch `MODEL_ID` to the 14B fallback.
+- **Primary model repo 404s** → community quant names change; search Hugging Face for `Qwen3-Coder-30B-A3B-Instruct AWQ` (or `GPTQ-Int4`) and paste the current repo id.
+- **Slow first response** → CUDA graph warmup + prefix cache cold; second request is faster.
+- **Tunnel URL not printed** → re-run the tunnel cell (quick tunnels occasionally fail to allocate).
+- **Kaggle rules note:** keep usage to interactive/dev workloads. Don't run it as a 24/7 public service — that's against Kaggle ToS and will get the account flagged.
+
+## Limits to know
+
+- 30 GPU-hours/week quota; session max ~12h; URL changes every session.
+- T4 = compute capability 7.5: no bf16, no FlashAttention-2 (the notebook already handles this with `--dtype half`).
